@@ -49,10 +49,12 @@ The HTTP calculator server. It:
 2. Binds it to a port (default `8080`).
 3. Listens for incoming connections.
 4. Accepts client connections.
-5. Reads HTTP requests.
-6. Processes calculator operations.
-7. Sends HTTP responses.
-8. Keeps the TCP connection open so more requests can be processed.
+5. Reads HTTP requests into a per-connection receive buffer.
+6. Detects the end of each HTTP request using `\r\n\r\n`.
+7. Processes one complete request at a time.
+8. Preserves any additional request data received in the same `recv()` call.
+9. Sends an HTTP response.
+10. Keeps the TCP connection open so more requests can be processed.
 
 ### `calculator_client.cpp`
 
@@ -88,6 +90,9 @@ Response:
 
 ```
 HTTP/1.1 200 OK
+Content-Length: 1
+Content-Type: text/plain
+Connection: keep-alive
 
 5
 ```
@@ -190,7 +195,7 @@ The server can be tested manually with `nc`. Since it runs on the same machine, 
 ### Addition
 
 ```bash
-printf 'GET /add?a=10&b=20 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /add?a=10&b=20 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `200 OK`, body `30`
@@ -198,7 +203,7 @@ Expected: `200 OK`, body `30`
 ### Subtraction
 
 ```bash
-printf 'GET /sub?a=20&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /sub?a=20&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `13`
@@ -206,7 +211,7 @@ Expected: `13`
 ### Multiplication
 
 ```bash
-printf 'GET /mul?a=6&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /mul?a=6&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `42`
@@ -214,7 +219,7 @@ Expected: `42`
 ### Division
 
 ```bash
-printf 'GET /div?a=20&b=4 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /div?a=20&b=4 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `5`
@@ -226,7 +231,7 @@ Expected: `5`
 ### Division by zero
 
 ```bash
-printf 'GET /div?a=10&b=0 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /div?a=10&b=0 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `400 Bad Request`
@@ -234,7 +239,7 @@ Expected: `400 Bad Request`
 ### Non-numeric input
 
 ```bash
-printf 'GET /add?a=hello&b=3 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /add?a=hello&b=3 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `400 Bad Request`
@@ -242,7 +247,7 @@ Expected: `400 Bad Request`
 ### Missing parameter
 
 ```bash
-printf 'GET /add?b=3 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /add?b=3 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `400 Bad Request`
@@ -250,7 +255,7 @@ Expected: `400 Bad Request`
 ### Unsupported operation
 
 ```bash
-printf 'GET /pow?a=2&b=8 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /pow?a=2&b=8 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `404 Not Found`
@@ -258,7 +263,7 @@ Expected: `404 Not Found`
 ### Unsupported HTTP method
 
 ```bash
-printf 'POST /add HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'POST /add HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `405 Method Not Allowed`
@@ -266,7 +271,7 @@ Expected: `405 Method Not Allowed`
 ### Missing Host header
 
 ```bash
-printf 'GET /add?a=2&b=3 HTTP/1.1\r\n\r\n' | nc localhost 8080
+printf 'GET /add?a=2&b=3 HTTP/1.1\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected: `400 Bad Request`
@@ -275,45 +280,35 @@ Expected: `400 Bad Request`
 
 ## Persistent Connection
 
-The server keeps the TCP connection open and handles multiple HTTP requests over it.
+The server keeps the TCP connection open and handles multiple HTTP requests over the same TCP connection.
 
-Start Netcat in CRLF mode (HTTP needs `\r\n` line endings, and plain `nc` sends `\n`):
+TCP is a byte stream, so multiple HTTP requests may arrive together in a single `recv()` call. The server therefore maintains a receive buffer for each client connection.
+
+For each request, the server:
+
+1. Reads incoming bytes into the receive buffer.
+2. Searches for `\r\n\r\n`, which marks the end of the HTTP headers.
+3. Extracts one complete HTTP request.
+4. Removes the processed request from the receive buffer.
+5. Preserves any remaining bytes for the next request.
+6. Processes the request and sends the response.
+7. Continues using the same TCP connection.
+
+For example, multiple requests can be sent together:
 
 ```bash
-nc -C localhost 8080
+printf 'GET /add?a=10&b=20 HTTP/1.1\r\nHost: localhost\r\n\r\nGET /sub?a=20&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\nGET /mul?a=6&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
 ```
 
-Then type:
+Expected response bodies:
 
-```
-GET /add?a=10&b=20 HTTP/1.1
-Host: localhost
-
-```
-
-(press Enter on the empty line at the end). The server returns `30`.
-
-Without closing Netcat, send another:
-
-```
-GET /sub?a=20&b=5 HTTP/1.1
-Host: localhost
-
+```text
+30
+15
+42
 ```
 
-Returns `15`.
-
-And another:
-
-```
-GET /mul?a=6&b=7 HTTP/1.1
-Host: localhost
-
-```
-
-Returns `42`.
-
-Three requests, one TCP connection.
+All three requests are handled over the same TCP connection.
 
 ---
 
