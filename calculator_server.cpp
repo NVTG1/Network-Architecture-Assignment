@@ -9,13 +9,17 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <cctype>
 
 using namespace std;
 
 const int DEFAULT_PORT = 8080;
 const int BUFFER_SIZE = 4096;
 
-// Sending all bytes
+// ============================================================
+// Send all bytes
+// ============================================================
+
 bool sendAll(int socket_fd, const string& data)
 {
     size_t total_sent = 0;
@@ -41,9 +45,9 @@ bool sendAll(int socket_fd, const string& data)
 }
 
 
-// ========================
+// ============================================================
 // Create an HTTP response
-// ========================
+// ============================================================
 
 string makeResponse(
     int status_code,
@@ -75,9 +79,9 @@ string makeResponse(
 }
 
 
-// ================
+// ============================================================
 // Trim whitespace
-// ================
+// ============================================================
 
 string trim(const string& str)
 {
@@ -94,9 +98,9 @@ string trim(const string& str)
 }
 
 
-// =============================
+// ============================================================
 // Parsing URL query parameters
-// =============================
+// ============================================================
 
 unordered_map<string, string> parseQuery(const string& query)
 {
@@ -141,16 +145,57 @@ unordered_map<string, string> parseQuery(const string& query)
 }
 
 
-// ===================================
-// Reading one complete HTTP request
-// ===================================
+// ============================================================
+// Reading ONE complete HTTP request
+//
+// IMPORTANT:
+// TCP is a byte stream.
+//
+// One recv() can contain:
+//   - half a request
+//   - exactly one request
+//   - multiple requests
+//
+// receive_buffer stores bytes that have arrived but have not
+// yet been consumed.
+// ============================================================
 
-bool readRequest(int client_socket, std::string& request) {
+bool readRequest(
+    int client_socket,
+    string& request,
+    string& receive_buffer
+)
+{
     request.clear();
 
-    char buffer[4096];
+    while (true)
+    {
+        // Check whether we already have a complete HTTP header.
+        size_t header_end =
+            receive_buffer.find("\r\n\r\n");
 
-    while (true) {
+        if (header_end != string::npos)
+        {
+            // Include the four bytes:
+            // \r\n\r\n
+            size_t request_end = header_end + 4;
+
+            // Take ONLY the first request.
+            request =
+                receive_buffer.substr(0, request_end);
+
+            // Remove the request we just consumed.
+            //
+            // If another request was already received,
+            // it remains inside receive_buffer.
+            receive_buffer.erase(0, request_end);
+
+            return true;
+        }
+
+        // We don't have a complete request yet.
+        char buffer[BUFFER_SIZE];
+
         ssize_t bytes_read = recv(
             client_socket,
             buffer,
@@ -158,41 +203,43 @@ bool readRequest(int client_socket, std::string& request) {
             0
         );
 
-        if (bytes_read < 0) {
+        if (bytes_read < 0)
+        {
             perror("recv");
             return false;
         }
 
-        if (bytes_read == 0) {
-            // Client closed the connection
+        if (bytes_read == 0)
+        {
+            // Client closed the connection.
             return false;
         }
 
-        request.append(buffer, bytes_read);
-
-        // We have received the end of the HTTP headers.
-        if (request.find("\r\n\r\n") != std::string::npos) {
-            return true;
-        }
+        // Add newly received bytes to our persistent buffer.
+        receive_buffer.append(
+            buffer,
+            bytes_read
+        );
 
         // Prevent an endlessly large request.
-        if (request.size() > 64 * 1024) {
-            std::cerr << "Request too large\n";
+        if (receive_buffer.size() > 64 * 1024)
+        {
+            cerr << "Request too large\n";
             return false;
         }
     }
 }
 
 
-// =========================
+// ============================================================
 // Process one HTTP request
-// =========================
+// ============================================================
 
 string handleRequest(const string& request)
 {
-    // Finding end of headers
-
-    size_t header_end = request.find("\r\n\r\n");
+    // Find end of HTTP headers.
+    size_t header_end =
+        request.find("\r\n\r\n");
 
     if (header_end == string::npos)
     {
@@ -203,13 +250,10 @@ string handleRequest(const string& request)
         );
     }
 
-    string headers = request.substr(
-        0,
-        header_end
-    );
+    string headers =
+        request.substr(0, header_end);
 
-    // Splitting headers into lines
-
+    // Split headers into lines.
     istringstream stream(headers);
 
     string request_line;
@@ -223,14 +267,14 @@ string handleRequest(const string& request)
         );
     }
 
-    // getline removes '\n' but leaves '\r'
+    // getline removes '\n' but leaves '\r'.
     if (!request_line.empty() &&
         request_line.back() == '\r')
     {
         request_line.pop_back();
     }
 
-    // Parsing request line
+    // Parse request line.
     istringstream request_stream(request_line);
 
     string method;
@@ -253,7 +297,7 @@ string handleRequest(const string& request)
         );
     }
 
-    // Only HTTP/1.1
+    // Only HTTP/1.1 is supported.
     if (version != "HTTP/1.1")
     {
         return makeResponse(
@@ -263,7 +307,7 @@ string handleRequest(const string& request)
         );
     }
 
-    // Parse headers
+    // Parse headers.
     bool has_host = false;
 
     string line;
@@ -301,7 +345,9 @@ string handleRequest(const string& request)
         // Convert header name to lowercase.
         for (char& c : header_name)
         {
-            c = tolower(c);
+            c = static_cast<char>(
+                tolower(static_cast<unsigned char>(c))
+            );
         }
 
         if (header_name == "host")
@@ -310,7 +356,7 @@ string handleRequest(const string& request)
         }
     }
 
-    // HTTP/1.1 requires Host
+    // HTTP/1.1 requires Host.
     if (!has_host)
     {
         return makeResponse(
@@ -320,7 +366,7 @@ string handleRequest(const string& request)
         );
     }
 
-    // Only GET is supported
+    // Only GET is supported.
     if (method != "GET")
     {
         return makeResponse(
@@ -330,8 +376,9 @@ string handleRequest(const string& request)
         );
     }
 
-    // Separate path and query string
-    size_t question_mark = target.find('?');
+    // Separate path and query string.
+    size_t question_mark =
+        target.find('?');
 
     string path;
     string query;
@@ -343,17 +390,19 @@ string handleRequest(const string& request)
     }
     else
     {
-        path = target.substr(
-            0,
-            question_mark
-        );
+        path =
+            target.substr(
+                0,
+                question_mark
+            );
 
-        query = target.substr(
-            question_mark + 1
-        );
+        query =
+            target.substr(
+                question_mark + 1
+            );
     }
 
-    // Check supported operations
+    // Check supported operations.
     if (path != "/add" &&
         path != "/sub" &&
         path != "/mul" &&
@@ -366,7 +415,7 @@ string handleRequest(const string& request)
         );
     }
 
-    // Parse a and b
+    // Parse a and b.
     auto params = parseQuery(query);
 
     if (params.find("a") == params.end() ||
@@ -387,9 +436,17 @@ string handleRequest(const string& request)
         size_t pos1;
         size_t pos2;
 
-        a = stoi(params["a"], &pos1);
-        b = stoi(params["b"], &pos2);
+        a = stoi(
+            params["a"],
+            &pos1
+        );
 
+        b = stoi(
+            params["b"],
+            &pos2
+        );
+
+        // Make sure the ENTIRE value is a number.
         if (pos1 != params["a"].size() ||
             pos2 != params["b"].size())
         {
@@ -409,23 +466,27 @@ string handleRequest(const string& request)
         );
     }
 
-    // Perform calculation
+    // Perform calculation.
     long long result;
 
     if (path == "/add")
     {
-        result = static_cast<long long>(a) + b;
+        result =
+            static_cast<long long>(a) + b;
     }
     else if (path == "/sub")
     {
-        result = static_cast<long long>(a) - b;
+        result =
+            static_cast<long long>(a) - b;
     }
     else if (path == "/mul")
     {
-        result = static_cast<long long>(a) * b;
+        result =
+            static_cast<long long>(a) * b;
     }
     else
     {
+        // /div
         if (b == 0)
         {
             return makeResponse(
@@ -446,9 +507,9 @@ string handleRequest(const string& request)
 }
 
 
-// ============================
-// Handling one TCP connection
-// ============================
+// ============================================================
+// Handling ONE TCP connection
+// ============================================================
 
 void handleConnection(
     int client_socket,
@@ -470,15 +531,23 @@ void handleConnection(
          << ntohs(client_address.sin_port)
          << endl;
 
+    // IMPORTANT:
+    // This buffer belongs to THIS TCP connection.
+    //
+    // It must stay alive while we process multiple
+    // HTTP requests on the same socket.
+    string receive_buffer;
+
     while (true)
     {
         string request;
 
-        // Read one request
+        // Read exactly ONE request.
         bool success =
             readRequest(
                 client_socket,
-                request
+                request,
+                receive_buffer
             );
 
         if (!success)
@@ -490,14 +559,15 @@ void handleConnection(
         cout << request;
         cout << "=============================\n";
 
-        // Generate response
+        // Generate response.
         string response =
             handleRequest(request);
 
-        // Send response
+        // Send response.
         if (!sendAll(
                 client_socket,
-                response))
+                response
+            ))
         {
             break;
         }
@@ -511,9 +581,9 @@ void handleConnection(
 }
 
 
-// =====
+// ============================================================
 // MAIN
-// =====
+// ============================================================
 
 int main(int argc, char* argv[])
 {
@@ -524,12 +594,13 @@ int main(int argc, char* argv[])
         port = stoi(argv[1]);
     }
 
-    // Create TCP socket
-    int server_socket = socket(
-        AF_INET,
-        SOCK_STREAM,
-        0
-    );
+    // Create TCP socket.
+    int server_socket =
+        socket(
+            AF_INET,
+            SOCK_STREAM,
+            0
+        );
 
     if (server_socket < 0)
     {
@@ -537,7 +608,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Allow quick restart
+    // Allow quick restart.
     int opt = 1;
 
     setsockopt(
@@ -548,10 +619,11 @@ int main(int argc, char* argv[])
         sizeof(opt)
     );
 
-    // Server address
+    // Server address.
     sockaddr_in server_address{};
 
-    server_address.sin_family = AF_INET;
+    server_address.sin_family =
+        AF_INET;
 
     server_address.sin_addr.s_addr =
         INADDR_ANY;
@@ -559,7 +631,7 @@ int main(int argc, char* argv[])
     server_address.sin_port =
         htons(port);
 
-    // Bind
+    // Bind.
     if (bind(
             server_socket,
             reinterpret_cast<sockaddr*>(
@@ -575,7 +647,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Listen
+    // Listen.
     if (listen(
             server_socket,
             10
@@ -596,10 +668,11 @@ int main(int argc, char* argv[])
          << "\n";
     cout << "Waiting for connections...\n";
 
-    // Accept connections forever
+    // Accept connections forever.
     while (true)
     {
         sockaddr_in client_address{};
+
         socklen_t client_length =
             sizeof(client_address);
 
@@ -623,6 +696,8 @@ int main(int argc, char* argv[])
             client_address
         );
     }
+
     close(server_socket);
+
     return 0;
 }
