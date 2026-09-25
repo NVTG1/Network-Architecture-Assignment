@@ -297,7 +297,7 @@ For each request, the server:
 For example, multiple requests can be sent together:
 
 ```bash
-printf 'GET /add?a=10&b=20 HTTP/1.1\r\nHost: localhost\r\n\r\nGET /sub?a=20&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\nGET /mul?a=6&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc localhost 8080
+printf 'GET /add?a=10&b=20 HTTP/1.1\r\nHost: localhost\r\n\r\nGET /sub?a=20&b=5 HTTP/1.1\r\nHost: localhost\r\n\r\nGET /mul?a=6&b=7 HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc -N localhost 8080
 ```
 
 Expected response bodies:
