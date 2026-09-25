@@ -146,18 +146,64 @@ unordered_map<string, string> parseQuery(const string& query)
 
 
 // ============================================================
+// Find Content-Length in a block of headers.
+//
+// Returns 0 if the header is missing or malformed. A request
+// with no body (like our GET calculator requests) has no
+// Content-Length, so 0 is the correct default.
+// ============================================================
+
+long long getContentLength(const string& headers)
+{
+    istringstream stream(headers);
+    string line;
+
+    // Skip the request line (GET /add?... HTTP/1.1).
+    getline(stream, line);
+
+    while (getline(stream, line))
+    {
+        if (!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+        }
+
+        size_t colon = line.find(':');
+        if (colon == string::npos)
+        {
+            continue;
+        }
+
+        string name = trim(line.substr(0, colon));
+        string value = trim(line.substr(colon + 1));
+
+        for (char& c : name)
+        {
+            c = static_cast<char>(
+                tolower(static_cast<unsigned char>(c))
+            );
+        }
+
+        if (name == "content-length")
+        {
+            try
+            {
+                long long length = stoll(value);
+                return (length < 0) ? 0 : length;
+            }
+            catch (...)
+            {
+                return 0;
+            }
+        }
+    }
+
+    return 0;
+}
+
+
+// ============================================================
 // Reading ONE complete HTTP request
-//
-// IMPORTANT:
-// TCP is a byte stream.
-//
-// One recv() can contain:
-//   - half a request
-//   - exactly one request
-//   - multiple requests
-//
-// receive_buffer stores bytes that have arrived but have not
-// yet been consumed.
 // ============================================================
 
 bool readRequest(
@@ -176,21 +222,35 @@ bool readRequest(
 
         if (header_end != string::npos)
         {
-            // Include the four bytes:
-            // \r\n\r\n
-            size_t request_end = header_end + 4;
+            // Look at Content-Length to know how many body
+            // bytes (if any) belong to this request.
+            string headers_only =
+                receive_buffer.substr(0, header_end);
 
-            // Take ONLY the first request.
-            request =
-                receive_buffer.substr(0, request_end);
+            long long content_length =
+                getContentLength(headers_only);
 
-            // Remove the request we just consumed.
-            //
-            // If another request was already received,
-            // it remains inside receive_buffer.
-            receive_buffer.erase(0, request_end);
+            // Bytes to consume: header block (+ \r\n\r\n) + body.
+            size_t request_end =
+                header_end + 4 +
+                static_cast<size_t>(content_length);
 
-            return true;
+            if (receive_buffer.size() >= request_end)
+            {
+                // Take ONLY this request (headers + its body).
+                request =
+                    receive_buffer.substr(0, request_end);
+
+                // Remove the request we just consumed.
+                //
+                // If another request was already received,
+                // it remains inside receive_buffer.
+                receive_buffer.erase(0, request_end);
+
+                return true;
+            }
+
+            // Headers are complete but the body hasn't fully arrived yet — fall through and recv() more.
         }
 
         // We don't have a complete request yet.
